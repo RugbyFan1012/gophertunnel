@@ -97,6 +97,25 @@ func RequestLiveTokenWriter(w io.Writer) (*oauth2.Token, error) {
 	panic("unreachable")
 }
 
+func GetDeviceCode() (*DeviceAuthConnect, error) {
+	resp, err := http.PostForm("https://login.live.com/oauth20_connect.srf", url.Values{
+		"client_id":     {"0000000048183522"},
+		"scope":         {"service::user.auth.xboxlive.com::MBI_SSL"},
+		"response_type": {"device_code"},
+	})
+	if err != nil {
+		return nil, fmt.Errorf("POST https://login.live.com/oauth20_connect.srf: %w", err)
+	}
+	defer func() {
+		_ = resp.Body.Close()
+	}()
+	if resp.StatusCode != 200 {
+		return nil, fmt.Errorf("POST https://login.live.com/oauth20_connect.srf: %v", resp.Status)
+	}
+	data := new(DeviceAuthConnect)
+	return data, json.NewDecoder(resp.Body).Decode(data)
+}
+
 // startDeviceAuth starts the device auth, retrieving a login URI for the user and a code the user needs to
 // enter.
 func startDeviceAuth() (*deviceAuthConnect, error) {
@@ -178,6 +197,13 @@ func refreshToken(t *oauth2.Token) (*oauth2.Token, error) {
 }
 
 type deviceAuthConnect struct {
+	UserCode        string `json:"user_code"`
+	DeviceCode      string `json:"device_code"`
+	VerificationURI string `json:"verification_uri"`
+	Interval        int    `json:"interval"`
+	ExpiresIn       int    `json:"expires_in"`
+}
+type DeviceAuthConnect struct {
 	UserCode        string `json:"user_code"`
 	DeviceCode      string `json:"device_code"`
 	VerificationURI string `json:"verification_uri"`

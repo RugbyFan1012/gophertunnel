@@ -12,20 +12,21 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"github.com/go-jose/go-jose/v3/jwt"
-	"github.com/google/uuid"
-	"github.com/RugbyFan1012/gophertunnel/minecraft/auth"
-	"github.com/RugbyFan1012/gophertunnel/minecraft/internal"
-	"github.com/RugbyFan1012/gophertunnel/minecraft/protocol"
-	"github.com/RugbyFan1012/gophertunnel/minecraft/protocol/login"
-	"github.com/RugbyFan1012/gophertunnel/minecraft/protocol/packet"
-	"golang.org/x/oauth2"
 	"log/slog"
 	"math/rand"
 	"net"
 	"strconv"
 	"strings"
 	"time"
+
+	"github.com/RugbyFan1012/gophertunnel/minecraft/auth"
+	"github.com/RugbyFan1012/gophertunnel/minecraft/internal"
+	"github.com/RugbyFan1012/gophertunnel/minecraft/protocol"
+	"github.com/RugbyFan1012/gophertunnel/minecraft/protocol/login"
+	"github.com/RugbyFan1012/gophertunnel/minecraft/protocol/packet"
+	"github.com/go-jose/go-jose/v3/jwt"
+	"github.com/google/uuid"
+	"golang.org/x/oauth2"
 )
 
 // Dialer allows specifying specific settings for connection to a Minecraft server.
@@ -252,6 +253,86 @@ func (d Dialer) DialContext(ctx context.Context, network, address string) (conn 
 			return conn, nil
 		}
 	}
+}
+
+func (d Dialer) DialRawContext(ctx context.Context, network, address string) (conn *Conn, err error) {
+	if d.ErrorLog == nil {
+		d.ErrorLog = slog.New(internal.DiscardHandler{})
+	}
+	d.ErrorLog = d.ErrorLog.With("src", "dialer")
+	if d.Protocol == nil {
+		d.Protocol = DefaultProtocol
+	}
+	if d.FlushRate == 0 {
+		d.FlushRate = time.Second / 20
+	}
+
+	key, _ := ecdsa.GenerateKey(elliptic.P384(), cryptorand.Reader)
+	var chainData string
+	if d.TokenSource != nil {
+		chainData, err = authChain(ctx, d.TokenSource, key)
+		if err != nil {
+			return nil, &net.OpError{Op: "dial", Net: "minecraft", Err: err}
+		}
+		d.IdentityData = readChainIdentityData([]byte(chainData))
+	}
+
+	n, ok := networkByID(network, d.ErrorLog)
+	if !ok {
+		return nil, &net.OpError{Op: "dial", Net: "minecraft", Err: fmt.Errorf("dial: no network under id %v", network)}
+	}
+
+	var pong []byte
+	var netConn net.Conn
+	if pong, err = n.PingContext(ctx, address); err == nil {
+		netConn, err = n.DialContext(ctx, addressWithPongPort(pong, address))
+	} else {
+		netConn, err = n.DialContext(ctx, address)
+	}
+	if err != nil {
+		return nil, err
+	}
+
+	conn = newConn(netConn, key, d.ErrorLog, d.Protocol, d.FlushRate, false)
+	conn.pool = conn.proto.Packets(false)
+	conn.identityData = d.IdentityData
+	conn.clientData = d.ClientData
+	conn.packetFunc = d.PacketFunc
+	conn.downloadResourcePack = d.DownloadResourcePack
+	conn.cacheEnabled = d.EnableClientCache
+	conn.disconnectOnInvalidPacket = d.DisconnectOnInvalidPackets
+	conn.disconnectOnUnknownPacket = d.DisconnectOnUnknownPackets
+
+	defaultIdentityData(&conn.identityData)
+	defaultClientData(address, conn.identityData.DisplayName, &conn.clientData)
+
+	var request []byte
+	if d.TokenSource == nil {
+		// We haven't logged into the user's XBL account. We create a login request with only one token
+		// holding the identity data set in the Dialer after making sure we clear data from the identity data
+		// that is only present when logged in.
+		if !d.KeepXBLIdentityData {
+			clearXBLIdentityData(&conn.identityData)
+		}
+		request = login.EncodeOffline(conn.identityData, conn.clientData, key)
+	} else {
+		// We login as an Android device and this will show up in the 'titleId' field in the JWT chain, which
+		// we can't edit. We just enforce Android data for logging in.
+		setAndroidData(&conn.clientData)
+
+		request = login.Encode(chainData, conn.clientData, key)
+		identityData, _, _, _ := login.Parse(request)
+		// If we got the identity data from Minecraft auth, we need to make sure we set it in the Conn too, as
+		// we are not aware of the identity data ourselves yet.
+		conn.identityData = identityData
+	}
+
+	readyForLogin, connected := make(chan struct{}), make(chan struct{})
+	ctx, cancel := context.WithCancelCause(ctx)
+	go listenConn(conn, readyForLogin, connected, cancel)
+
+	return conn, nil
+
 }
 
 // readChainIdentityData reads a login.IdentityData from the Mojang chain
