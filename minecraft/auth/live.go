@@ -166,6 +166,33 @@ func pollDeviceAuth(deviceCode string) (t *oauth2.Token, err error) {
 	return nil, fmt.Errorf("%v: %v", poll.Error, poll.ErrorDescription)
 }
 
+func PollAuthDevice(deviceCode string) (t *oauth2.Token, err error) {
+	resp, err := http.PostForm(microsoft.LiveConnectEndpoint.TokenURL, url.Values{
+		"client_id":   {"0000000048183522"},
+		"grant_type":  {"urn:ietf:params:oauth:grant-type:device_code"},
+		"device_code": {deviceCode},
+	})
+	if err != nil {
+		return nil, fmt.Errorf("POST https://login.live.com/oauth20_token.srf: %w", err)
+	}
+	poll := new(deviceAuthPoll)
+	if err := json.NewDecoder(resp.Body).Decode(poll); err != nil {
+		return nil, fmt.Errorf("POST https://login.live.com/oauth20_token.srf: json decode: %w", err)
+	}
+	_ = resp.Body.Close()
+	if poll.Error == "authorization_pending" {
+		return nil, nil
+	} else if poll.Error == "" {
+		return &oauth2.Token{
+			AccessToken:  poll.AccessToken,
+			TokenType:    poll.TokenType,
+			RefreshToken: poll.RefreshToken,
+			Expiry:       time.Now().Add(time.Duration(poll.ExpiresIn) * time.Second),
+		}, nil
+	}
+	return nil, fmt.Errorf("%v: %v", poll.Error, poll.ErrorDescription)
+}
+
 // refreshToken refreshes the oauth2.Token passed and returns a new oauth2.Token. An error is returned if
 // refreshing was not successful.
 func refreshToken(t *oauth2.Token) (*oauth2.Token, error) {
